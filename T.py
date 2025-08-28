@@ -1,439 +1,440 @@
-import streamlit as st
+# app.py
+# Streamlit dashboard to analyze "Child Rescue Details" from a Google Sheet
+# Author: ChatGPT (GPT-5 Thinking)
+
+import re
+import io
+import math
+import time
 import pandas as pd
 import numpy as np
-import io
-from urllib.parse import urlparse, parse_qs
+import streamlit as st
 import plotly.express as px
 
-# -----------------------------
-# Page Config
-# -----------------------------
+# ----------------------
+# CONFIG
+# ----------------------
+# 👉 Replace these with your own Sheet settings if needed
+SHEET_ID = "13svivZvyrpXZPhApZLcyr4kafCvMcFgC1jIT7Xu64L8"  # provided by user
+GID = "0"  # main tab gid; change if your data lives in another tab
+
+# You may also hardcode the tab name instead of gid by using the 'sheet' query param
+# e.g. CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Sheet1"
+CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
+
 st.set_page_config(
-    page_title="Universal Google Sheet Explorer",
-    page_icon="📊",
+    page_title="Child Rescue Analytics",
+    page_icon="👧🏽",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def to_csv_export_url(google_sheet_url: str) -> str:
-    """
-    Convert an 'edit?gid=' Google Sheet URL into a direct CSV export URL for that gid.
-    Works if the sheet is viewable publicly or to anyone with the link.
-    """
-    if "docs.google.com/spreadsheets" not in google_sheet_url:
-        return google_sheet_url  # assume it's already a direct CSV or a normal CSV link
+# ----------------------
+# THEME (light, clean)
+# ----------------------
+CUSTOM_CSS = """
+<style>
+/***** Global *****/
+:root { --radius: 16px; }
+.block-container { padding-top: 1rem; padding-bottom: 3rem; }
+/* Cards */
+div[data-testid="stMetric"] > div { border-radius: var(--radius); }
+/* Tables */
+.stDataFrame, .stTable { border-radius: var(--radius); overflow: hidden; }
+/* Pills */
+.badge { background:#eef2ff; border:1px solid #c7d2fe; padding:4px 10px; border-radius:999px; font-size:12px; }
+/* Section headers */
+.section-title { font-size:1.25rem; font-weight:700; margin: 8px 0 4px 0; }
+.subtle { color:#475569; }
+.kpi-card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:var(--radius); padding:14px; }
+.warn { background:#fff7ed; border:1px solid #fdba74; }
+.ok { background:#ecfeff; border:1px solid #67e8f9; }
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-    # Try to extract gid
-    parsed = urlparse(google_sheet_url)
-    qs = parse_qs(parsed.query)
-    gid = None
-    if "gid" in qs and qs["gid"]:
-        gid = qs["gid"][0]
+# ----------------------
+# HELPERS
+# ----------------------
 
-    # Turn /edit? into /export?format=csv
-    # Typical: https://docs.google.com/spreadsheets/d/<ID>/edit?gid=<GID>
-    # ->      https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<GID>
-    parts = google_sheet_url.split("/edit")
-    if len(parts) > 1:
-        base = parts[0]
-        export = f"{base}/export?format=csv"
-        if gid:
-            export += f"&gid={gid}"
-        return export
-
-    # If no /edit segment, try a simple replacement fallback
-    return google_sheet_url.replace("/view", "/export?format=csv")
-
-@st.cache_data(show_spinner=True, ttl=600)
-def load_data(sheet_url: str) -> pd.DataFrame:
-    csv_url = to_csv_export_url(sheet_url.strip())
-    df = pd.read_csv(csv_url, dtype=str)  # read as string first to avoid bad type guesses
-    # Clean columns: strip spaces/newlines in headers
-    df.columns = [str(c).strip() for c in df.columns]
-    # Try smart type inference per column
-    df = smart_cast_df(df)
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Lowercase, strip, replace spaces and special chars with underscores."""
+    df = df.copy()
+    df.columns = [
+        re.sub(r"[^a-z0-9_]+", "_", c.strip().lower().replace(" ", "_")).strip("_")
+        for c in df.columns
+    ]
     return df
 
-def smart_cast_series(s: pd.Series) -> pd.Series:
-    # Try boolean
-    lower_vals = s.dropna().astype(str).str.lower().unique()
-    bool_like = set(["true","false","yes","no","y","n","t","f","1","0"])
-    if len(lower_vals) > 0 and all(v in bool_like for v in lower_vals):
-        return s.astype(str).str.lower().map({
-            "true": True, "t": True, "yes": True, "y": True, "1": True,
-            "false": False, "f": False, "no": False, "n": False, "0": False
-        })
+AGE_COL_CANDIDATES = ["age", "child_age"]
+WEIGHT_COL_CANDIDATES = ["weight", "wt", "weight_kg"]
+GENDER_COL_CANDIDATES = ["gender", "sex"]
+LOCATION_COL_CANDIDATES = ["rescue_location", "location", "city", "district"]
+SCHOOL_COL_CANDIDATES = ["school_enrollment_specify_the_school_name", "school", "school_name", "enrolled_school"]
+CLASS_COL_CANDIDATES = ["class", "grade", "standard"]
+ATTENDANCE_COL_CANDIDATES = ["monthly_attendance", "attendance", "avg_attendance"]
+BIRTH_CERT_COLS = ["birth_certificate", "birth_cert", "birth_cert_status"]
+AADHAR_COLS = ["aadhar", "aadhaar", "aadhar_status"]
+MEDICAL_COLS = ["medical_check_up", "medical", "medical_status"]
+PARENTS_VERIFIED_COLS = ["parents_verified", "guardians_verified", "verification_status"]
+DNA_COLS = ["dna", "dna_status"]
 
-    # Try numeric
-    try:
-        s_num = pd.to_numeric(s, errors="raise")
-        return s_num
-    except Exception:
-        pass
 
-    # Try datetime (day-first off by default; we’ll allow flexible)
-    try:
-        s_dt = pd.to_datetime(s, errors="raise", infer_datetime_format=True, utc=False)
-        return s_dt
-    except Exception:
-        pass
+def choose_col(df: pd.DataFrame, candidates) -> str | None:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
 
-    # Fallback to stripped strings
-    return s.astype(str).str.strip().replace({"": np.nan})
 
-def smart_cast_df(df: pd.DataFrame) -> pd.DataFrame:
-    out = {}
-    for col in df.columns:
-        out[col] = smart_cast_series(df[col])
-    return pd.DataFrame(out)
+def to_bool_series(s: pd.Series) -> pd.Series:
+    if s is None:
+        return None
+    def _coerce(v):
+        if pd.isna(v):
+            return np.nan
+        x = str(v).strip().lower()
+        if x in {"yes", "y", "true", "1", "done", "completed"}:
+            return True
+        if x in {"no", "n", "false", "0", "pending", "incomplete"}:
+            return False
+        return np.nan
+    return s.map(_coerce)
 
-def basic_profile(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create a compact profile for each column:
-    type, non-null count, missing %, unique, sample values, min/max for numeric/dates, avg length for text.
-    """
-    rows = []
-    for c in df.columns:
-        s = df[c]
-        dtype = str(s.dtype)
-        non_null = s.notna().sum()
-        missing = s.isna().mean() * 100.0
-        unique = s.nunique(dropna=True)
 
-        sample_vals = ", ".join([repr(x)[:30] for x in s.dropna().unique()[:5]])
+def parse_age(val):
+    if pd.isna(val):
+        return np.nan
+    s = str(val).strip().lower()
+    # ranges like "3-4" or "3 to 4"
+    m = re.match(r"^(\d+(?:\.\d+)?)[\s\-to]+(\d+(?:\.\d+)?)", s)
+    if m:
+        a = float(m.group(1))
+        b = float(m.group(2))
+        return round((a + b) / 2.0, 2)
+    # numbers with text like "3 yrs", "4y"
+    m = re.search(r"(\d+(?:\.\d+)?)", s)
+    if m:
+        return float(m.group(1))
+    return np.nan
 
-        min_val = max_val = None
-        avg_len = None
-        if pd.api.types.is_numeric_dtype(s):
-            min_val = pd.to_numeric(s, errors="coerce").min()
-            max_val = pd.to_numeric(s, errors="coerce").max()
-        elif pd.api.types.is_datetime64_any_dtype(s):
-            min_val = pd.to_datetime(s, errors="coerce").min()
-            max_val = pd.to_datetime(s, errors="coerce").max()
-        else:
-            # text-like
-            avg_len = s.dropna().astype(str).apply(len).mean() if non_null else None
 
-        rows.append({
-            "Column": c,
-            "Type": dtype,
-            "Non-Null": int(non_null),
-            "Missing %": round(missing, 2),
-            "Unique": int(unique),
-            "Min": min_val,
-            "Max": max_val,
-            "Avg Length (if text)": None if avg_len is None else round(avg_len, 2),
-            "Sample Values": sample_vals
-        })
-    return pd.DataFrame(rows)
+def parse_weight(val):
+    if pd.isna(val):
+        return np.nan
+    s = str(val).lower()
+    m = re.search(r"(\d+(?:\.\d+)?)", s)
+    if m:
+        return float(m.group(1))
+    return np.nan
 
-def infer_date_columns(df: pd.DataFrame):
-    return [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
 
-def infer_numeric_columns(df: pd.DataFrame):
-    return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+@st.cache_data(ttl=300, show_spinner=False)
+def load_data(csv_url: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_url)
+    df = normalize_columns(df)
 
-def infer_categorical_columns(df: pd.DataFrame, max_unique_ratio=0.2, max_unique_abs=50):
-    cats = []
-    n = len(df)
-    for c in df.columns:
-        if pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
-            cats.append(c)
-        else:
-            # numeric with small cardinality: treat as categorical
-            u = df[c].nunique(dropna=True)
-            if u <= max_unique_abs or (n > 0 and u / n <= max_unique_ratio):
-                cats.append(c)
-    return list(dict.fromkeys(cats))  # preserve order, unique
+    # Coerce key columns if present
+    age_col = choose_col(df, AGE_COL_CANDIDATES)
+    weight_col = choose_col(df, WEIGHT_COL_CANDIDATES)
+    gender_col = choose_col(df, GENDER_COL_CANDIDATES)
 
-def download_link(df: pd.DataFrame, filename="filtered_data.csv"):
-    csv = df.to_csv(index=False)
-    st.download_button("⬇ Download filtered data (CSV)", data=csv, file_name=filename, mime="text/csv")
+    if age_col:
+        df[age_col + "_num"] = df[age_col].apply(parse_age)
+    if weight_col:
+        df[weight_col + "_kg"] = df[weight_col].apply(parse_weight)
+    if gender_col:
+        df[gender_col] = df[gender_col].astype(str).str.strip().str.title()
 
-# -----------------------------
-# Sidebar – Data Input
-# -----------------------------
-st.sidebar.title("🔗 Data Source")
-default_url = "https://docs.google.com/spreadsheets/d/13svivZvyrpXZPhApZLcyr4kafCvMcFgC1jIT7Xu64L8/edit?gid=0#gid=0"
-sheet_url = st.sidebar.text_input("Google Sheet URL (shareable link)", value=default_url)
-st.sidebar.caption("Tip: Make sure your sheet is accessible to 'Anyone with the link' for direct CSV export.")
+    # Boolean-ish columns
+    for candidates in [BIRTH_CERT_COLS, AADHAR_COLS, MEDICAL_COLS, PARENTS_VERIFIED_COLS, DNA_COLS]:
+        col = choose_col(df, candidates)
+        if col:
+            df[col + "_bool"] = to_bool_series(df[col])
 
-load_button = st.sidebar.button("Load / Refresh Data", type="primary")
+    # attendance to numeric percent if present
+    att_col = choose_col(df, ATTENDANCE_COL_CANDIDATES)
+    if att_col and att_col in df.columns:
+        def _att(v):
+            if pd.isna(v):
+                return np.nan
+            s = str(v)
+            m = re.search(r"(\d+(?:\.\d+)?)", s)
+            return float(m.group(1))
+        df[att_col + "_pct"] = df[att_col].apply(_att)
 
-# -----------------------------
+    return df
+
+
+def kpi_card(label: str, value, help_text: str | None = None):
+    with st.container(border=True):
+        st.metric(label, value)
+        if help_text:
+            st.caption(help_text)
+
+
+# ----------------------
+# SIDEBAR
+# ----------------------
+st.sidebar.title("⚙️ Settings")
+st.sidebar.write("Data Source")
+st.sidebar.code(CSV_URL, language="text")
+
+if st.sidebar.button("🔄 Refresh data"):
+    load_data.clear()
+
+st.sidebar.markdown("---")
+
+# Filters (dynamic)
+st.sidebar.subheader("Filters")
+
 # Load data
-# -----------------------------
-if sheet_url or load_button:
+with st.spinner("Loading data…"):
     try:
-        df = load_data(sheet_url)
+        df = load_data(CSV_URL)
+        load_error = None
     except Exception as e:
-        st.error(f"❌ Could not load data. Check sharing settings or link.\n\nDetails: {e}")
-        st.stop()
-else:
-    st.info("Paste your Google Sheet link in the sidebar, then click *Load / Refresh Data*.")
+        df = pd.DataFrame()
+        load_error = str(e)
+
+if load_error:
+    st.error("Failed to load data from Google Sheets.\n\n" + load_error)
     st.stop()
 
-# -----------------------------
-# Header
-# -----------------------------
-st.title("📊 Google Sheet Explorer – Instant Insight Dashboard")
-st.caption("Paste a Google Sheet link in the sidebar and explore everything in one place.")
+# figure out common columns
+age_col = choose_col(df, AGE_COL_CANDIDATES)
+weight_col = choose_col(df, WEIGHT_COL_CANDIDATES)
+gender_col = choose_col(df, GENDER_COL_CANDIDATES)
+loc_col = choose_col(df, LOCATION_COL_CANDIDATES)
+school_col = choose_col(df, SCHOOL_COL_CANDIDATES)
+class_col = choose_col(df, CLASS_COL_CANDIDATES)
+att_col = choose_col(df, ATTENDANCE_COL_CANDIDATES)
 
-st.markdown(
-    """
-    *What you get at a glance*
-    - Data overview, missing values, and column profiling  
-    - Powerful filters for categorical, numeric, and date columns  
-    - Quick summary statistics and distributions  
-    - One-click visualizations (histogram, bar, box, scatter)  
-    - Correlation heatmap for numeric columns  
-    - Pivot builder (drag-like via selectors)  
-    - Time-series view if your data has date columns  
-    """
-)
+# Optional filters
+if gender_col and gender_col in df.columns:
+    genders = ["All"] + sorted([g for g in df[gender_col].dropna().unique().tolist() if g])
+    sel_gender = st.sidebar.selectbox("Gender", options=genders, index=0)
+else:
+    sel_gender = "All"
 
-# -----------------------------
-# Schema + Profiling
-# -----------------------------
-with st.expander("📋 Dataset Snapshot", expanded=True):
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Rows", f"{len(df):,}")
-    c2.metric("Columns", f"{df.shape[1]:,}")
-    c3.metric("Missing Cells", f"{int(df.isna().sum().sum()):,}")
-    c4.metric("Completeness %", f"{round(100*(1 - df.isna().sum().sum()/(df.shape[0]*df.shape[1]+1e-9)),2)}%")
+if age_col and age_col + "_num" in df.columns:
+    min_age = float(np.nanmin(df[age_col + "_num"])) if not df.empty else 0.0
+    max_age = float(np.nanmax(df[age_col + "_num"])) if not df.empty else 20.0
+    age_range = st.sidebar.slider("Age range", min_value=0.0, max_value=max(1.0, round(max_age + 0.5, 1)), value=(0.0, max(1.0, max_age)), step=0.5)
+else:
+    age_range = (0.0, 100.0)
 
-    st.dataframe(df.head(50), use_container_width=True)
+if loc_col and loc_col in df.columns:
+    locations = ["All"] + sorted([l for l in df[loc_col].dropna().astype(str).unique().tolist() if l])
+    sel_loc = st.sidebar.selectbox("Rescue location", options=locations, index=0)
+else:
+    sel_loc = "All"
 
-prof = basic_profile(df)
-with st.expander("🧬 Column Profiling", expanded=False):
-    st.dataframe(prof, use_container_width=True)
+# documentation filters
+birth_col = choose_col(df, BIRTH_CERT_COLS)
+aadhar_col = choose_col(df, AADHAR_COLS)
+medical_col = choose_col(df, MEDICAL_COLS)
+parents_col = choose_col(df, PARENTS_VERIFIED_COLS)
+dna_col = choose_col(df, DNA_COLS)
 
-# -----------------------------
-# Build Filters
-# -----------------------------
-st.subheader("🔎 Filter Your Data")
-date_cols = infer_date_columns(df)
-num_cols = infer_numeric_columns(df)
-cat_cols = infer_categorical_columns(df)
+req_docs = []
+if birth_col: req_docs.append((birth_col + "_bool", "Missing Birth Certificate"))
+if aadhar_col: req_docs.append((aadhar_col + "_bool", "Missing Aadhar"))
+if medical_col: req_docs.append((medical_col + "_bool", "Medical Pending"))
+if parents_col: req_docs.append((parents_col + "_bool", "Parents Not Verified"))
+if dna_col: req_docs.append((dna_col + "_bool", "DNA Pending"))
 
-with st.container():
-    left, right = st.columns([2, 3])
-
-    with left:
-        st.markdown("*Categorical / Boolean Filters*")
-        cat_filters = {}
-        for c in cat_cols:
-            # Skip date/numeric from categorical box if already detected
-            if c in date_cols or c in num_cols:
-                continue
-            uniques = df[c].dropna().unique().tolist()
-            if len(uniques) > 2000:
-                continue  # avoid too heavy widgets
-            chosen = st.multiselect(f"{c}", options=sorted(uniques, key=lambda x: str(x)), default=[])
-            if chosen:
-                cat_filters[c] = chosen
-
-    with right:
-        st.markdown("*Numeric & Date Filters*")
-
-        # Numeric ranges
-        num_ranges = {}
-        for c in num_cols:
-            s = pd.to_numeric(df[c], errors="coerce")
-            if s.notna().sum() == 0:
-                continue
-            min_v = float(np.nanmin(s))
-            max_v = float(np.nanmax(s))
-            if min_v == max_v:
-                continue
-            r = st.slider(f"{c} range", min_value=min_v, max_value=max_v, value=(min_v, max_v))
-            num_ranges[c] = r
-
-        # Date ranges
-        date_ranges = {}
-        for c in date_cols:
-            s = pd.to_datetime(df[c], errors="coerce")
-            smin = s.min()
-            smax = s.max()
-            if pd.isna(smin) or pd.isna(smax) or smin == smax:
-                continue
-            dr = st.date_input(f"{c} range", value=(smin.date(), smax.date()))
-            if isinstance(dr, tuple) and len(dr) == 2:
-                start, end = dr
-                date_ranges[c] = (pd.to_datetime(start), pd.to_datetime(end))
+with_docs_filter = st.sidebar.toggle("Show only children with pending actions", value=False)
 
 # Apply filters
-df_filtered = df.copy()
+filtered = df.copy()
+if gender_col and sel_gender != "All":
+    filtered = filtered[filtered[gender_col] == sel_gender]
+if age_col and age_col + "_num" in filtered.columns:
+    filtered = filtered[filtered[age_col + "_num"].between(age_range[0], age_range[1])]
+if loc_col and sel_loc != "All":
+    filtered = filtered[filtered[loc_col] == sel_loc]
+if with_docs_filter and req_docs:
+    mask = np.zeros(len(filtered), dtype=bool)
+    for colname, _ in req_docs:
+        if colname in filtered.columns:
+            # pending = False or NaN
+            mask |= (~filtered[colname].fillna(False))
+    filtered = filtered[mask]
 
-# Apply cat filters
-for c, vals in (cat_filters if 'cat_filters' in locals() else {}).items():
-    df_filtered = df_filtered[df_filtered[c].isin(vals)]
+# ----------------------
+# HEADER
+# ----------------------
+st.title("👧🏽 Child Rescue Analytics")
+st.caption("Interactive dashboard generated from your Google Sheet. Use the sidebar to filter and the tabs below to explore.")
 
-# Apply numeric ranges
-for c, (lo, hi) in (num_ranges if 'num_ranges' in locals() else {}).items():
-    s = pd.to_numeric(df_filtered[c], errors="coerce")
-    df_filtered = df_filtered[(s >= lo) & (s <= hi)]
+# ----------------------
+# KPI ROW
+# ----------------------
+col1, col2, col3, col4, col5 = st.columns(5)
 
-# Apply date ranges
-for c, (start, end) in (date_ranges if 'date_ranges' in locals() else {}).items():
-    s = pd.to_datetime(df_filtered[c], errors="coerce")
-    df_filtered = df_filtered[(s >= start) & (s <= end)]
+total_children = len(filtered)
+with col1:
+    kpi_card("Total children (filtered)", f"{total_children}")
 
-st.success(f"Filters applied. Showing *{len(df_filtered):,} / {len(df):,}* rows.")
-st.dataframe(df_filtered.head(1000), use_container_width=True, height=300)
-download_link(df_filtered)
+if gender_col and gender_col in filtered.columns:
+    male_ct = int((filtered[gender_col] == "Male").sum())
+    female_ct = int((filtered[gender_col] == "Female").sum())
+    other_ct = int(total_children - male_ct - female_ct)
+    with col2:
+        kpi_card("Gender split (M/F/Other)", f"{male_ct}/{female_ct}/{other_ct}")
+else:
+    with col2:
+        kpi_card("Gender split", "—")
 
-# -----------------------------
-# Quick Insights
-# -----------------------------
-st.header("✨ Quick Insights")
+if age_col and age_col + "_num" in filtered.columns:
+    avg_age = round(float(np.nanmean(filtered[age_col + "_num"])) , 2) if total_children else np.nan
+    with col3:
+        kpi_card("Avg. age", f"{avg_age if not math.isnan(avg_age) else '—'} yrs")
+else:
+    with col3:
+        kpi_card("Avg. age", "—")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Summary", "Distributions", "Correlation", "Scatter", "Box Plots", "Pivot"
+if weight_col and weight_col + "_kg" in filtered.columns:
+    avg_wt = round(float(np.nanmean(filtered[weight_col + "_kg"])) , 2) if total_children else np.nan
+    with col4:
+        kpi_card("Avg. weight", f"{avg_wt if not math.isnan(avg_wt) else '—'} kg")
+else:
+    with col4:
+        kpi_card("Avg. weight", "—")
+
+# docs completion rate
+completed_parts = []
+possible_parts = 0
+for (colname, label) in req_docs:
+    if colname in filtered.columns:
+        possible_parts += len(filtered)
+        completed_parts.append(filtered[colname].fillna(False).sum())
+if possible_parts > 0:
+    docs_completion = int(round(100 * sum(completed_parts) / possible_parts))
+else:
+    docs_completion = None
+with col5:
+    kpi_card("Documentation complete", f"{docs_completion}%" if docs_completion is not None else "—", "Share of YES across doc/medical checks")
+
+# ----------------------
+# TABS
+# ----------------------
+
+overview_tab, records_tab, gaps_tab, charts_tab = st.tabs([
+    "📊 Overview", "📋 Records", "⚠️ Gaps & Actions", "📈 Charts"
 ])
 
-with tab1:
-    st.subheader("📌 Summary Statistics")
-    # Numeric summary
-    if num_cols:
-        st.markdown("*Numeric Columns*")
-        st.dataframe(df_filtered[num_cols].describe().T, use_container_width=True)
+with overview_tab:
+    st.subheader("Snapshot")
+    left, right = st.columns([1,1])
+
+    # Gender distribution
+    if gender_col and gender_col in filtered.columns and not filtered.empty:
+        gender_counts = (
+            filtered.groupby(gender_col).size().reset_index(name="count")
+        )
+        fig = px.pie(gender_counts, names=gender_col, values="count", title="Gender Distribution")
+        left.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No numeric columns detected.")
+        left.info("Gender column not found.")
 
-    # Missing by column
-    st.markdown("*Missing Values by Column*")
-    miss = df_filtered.isna().mean().sort_values(ascending=False) * 100
-    miss_df = pd.DataFrame({"Column": miss.index, "Missing %": miss.values})
-    st.dataframe(miss_df, use_container_width=True)
-
-with tab2:
-    st.subheader("📈 Distributions")
-    # Choose a column and auto-plot by type
-    dist_col = st.selectbox("Select a column to visualize", options=df.columns)
-    if dist_col:
-        s = df_filtered[dist_col]
-        if pd.api.types.is_numeric_dtype(s):
-            fig = px.histogram(df_filtered, x=dist_col, nbins=40)
-            st.plotly_chart(fig, use_container_width=True)
-        elif pd.api.types.is_datetime64_any_dtype(s):
-            # Plot counts by date
-            temp = df_filtered.copy()
-            temp["_date"] = pd.to_datetime(temp[dist_col], errors="coerce").dt.date
-            counts = temp.groupby("_date").size().reset_index(name="Count")
-            fig = px.line(counts, x="_date", y="Count")
-            st.plotly_chart(fig, use_container_width=True)
+    # Age distribution
+    if age_col and age_col + "_num" in filtered.columns and not filtered.empty:
+        # create age bands
+        ages = filtered[age_col + "_num"].dropna()
+        if not ages.empty:
+            bins = [0,2,5,10,15,20]
+            labels = ["0-2","2-5","5-10","10-15","15-20"]
+            bands = pd.cut(ages, bins=bins, labels=labels, include_lowest=True)
+            age_df = pd.DataFrame({"Age Band": bands}).value_counts().reset_index(name="count")
+            age_df = age_df.rename(columns={0:"count"}) if 0 in age_df.columns else age_df
+            fig2 = px.bar(age_df, x="Age Band", y="count", title="Age Bands")
+            right.plotly_chart(fig2, use_container_width=True)
         else:
-            # categorical bar
-            counts = s.value_counts(dropna=False).reset_index()
-            counts.columns = [dist_col, "Count"]
-            if len(counts) > 50:
-                counts = counts.head(50)
-            fig = px.bar(counts, x=dist_col, y="Count")
-            st.plotly_chart(fig, use_container_width=True)
-
-with tab3:
-    st.subheader("📉 Correlation Heatmap (numeric)")
-    if len(num_cols) >= 2:
-        corr = df_filtered[num_cols].corr(numeric_only=True)
-        fig = px.imshow(corr, text_auto=True, aspect="auto")
-        st.plotly_chart(fig, use_container_width=True)
+            right.info("No numeric age data.")
     else:
-        st.info("Need at least two numeric columns for correlation.")
+        right.info("Age column not found.")
 
-with tab4:
-    st.subheader("🔍 Scatter Explorer (numeric vs numeric)")
-    if len(num_cols) >= 2:
-        c1, c2 = st.columns(2)
-        with c1:
-            xcol = st.selectbox("X-axis", options=num_cols, index=0)
-        with c2:
-            ycol = st.selectbox("Y-axis", options=[c for c in num_cols if c != xcol], index=0)
-        color_by = st.selectbox("Color by (optional)", options=["(none)"] + df.columns.tolist(), index=0)
-        if xcol and ycol:
-            if color_by == "(none)":
-                fig = px.scatter(df_filtered, x=xcol, y=ycol, hover_data=df_filtered.columns)
-            else:
-                fig = px.scatter(df_filtered, x=xcol, y=ycol, color=df_filtered[color_by].astype(str), hover_data=df_filtered.columns)
-            st.plotly_chart(fig, use_container_width=True)
+with records_tab:
+    st.subheader("Filtered Records")
+    st.caption("Tip: Use the column header menu to search & sort. Download below.")
+    st.dataframe(filtered, use_container_width=True, hide_index=True)
+
+    # Download
+    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Download filtered CSV",
+        data=csv_bytes,
+        file_name="child_rescue_filtered.csv",
+        mime="text/csv",
+    )
+
+with gaps_tab:
+    st.subheader("Pending Actions")
+    if not req_docs:
+        st.info("No documentation/medical columns found.")
     else:
-        st.info("Need at least two numeric columns.")
+        cols = st.columns(2)
+        todo_frames = []
+        for (colname, label) in req_docs:
+            if colname in filtered.columns:
+                pending_df = filtered[~filtered[colname].fillna(False)]
+                count = len(pending_df)
+                with cols[0] if len(todo_frames)%2==0 else cols[1]:
+                    with st.container(border=True, key=label):
+                        st.markdown(f"**{label}**")
+                        st.write(f"{count} child(ren) pending")
+                        if count:
+                            st.dataframe(pending_df, use_container_width=True, hide_index=True)
+                            todo_frames.append(pending_df)
+        if not todo_frames:
+            st.success("Great! No pending items found for the current filters.")
 
-with tab5:
-    st.subheader("📦 Box Plots (numeric by category)")
-    if num_cols:
-        num_for_box = st.selectbox("Numeric column", options=num_cols)
-        cat_for_box = st.selectbox("Group by (categorical/date/any)", options=["(none)"] + df.columns.tolist(), index=0)
-        if cat_for_box == "(none)":
-            fig = px.box(df_filtered, y=num_for_box, points="outliers")
+with charts_tab:
+    st.subheader("Custom Charts")
+
+    # Choose x/y quickly from available numeric/categorical columns
+    numeric_cols = [c for c in filtered.columns if pd.api.types.is_numeric_dtype(filtered[c])]
+    cat_cols = [c for c in filtered.columns if filtered[c].dtype == object and filtered[c].nunique() <= 50]
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        x_cat = st.selectbox("Category (x)", options=[None] + cat_cols, index=0)
+    with col_b:
+        y_num = st.selectbox("Value (y)", options=[None] + numeric_cols, index=0)
+
+    if x_cat and y_num:
+        aggfunc = st.radio("Aggregate", ["mean", "sum", "count"], horizontal=True)
+        if aggfunc == "count":
+            plot_df = filtered.groupby(x_cat).size().reset_index(name="value")
         else:
-            fig = px.box(df_filtered, x=df_filtered[cat_for_box].astype(str), y=num_for_box, points="outliers")
-        st.plotly_chart(fig, use_container_width=True)
+            plot_df = filtered.groupby(x_cat)[y_num].agg(aggfunc).reset_index(name="value")
+        fig3 = px.bar(plot_df, x=x_cat, y="value", title=f"{aggfunc.title()} of {y_num} by {x_cat}")
+        st.plotly_chart(fig3, use_container_width=True)
     else:
-        st.info("No numeric columns for box plots.")
+        st.info("Select a category and a numeric value to build a chart.")
 
-with tab6:
-    st.subheader("🧮 Pivot Builder")
-    # Choose index, columns, values, aggfunc
-    idx = st.multiselect("Index (rows)", options=df.columns)
-    cols = st.multiselect("Columns (pivot across)", options=[c for c in df.columns if c not in idx])
-    vals = st.multiselect("Values", options=[c for c in df.columns if c not in idx + cols])
-    agg = st.selectbox("Aggregation", options=["count","sum","mean","median","min","max","nunique"], index=0)
+# ----------------------
+# FOOTER / HELP
+# ----------------------
+with st.expander("ℹ️ How this works / Setup"):
+    st.markdown(
+        """
+        **Data Source**: This app reads your Google Sheet via the CSV export URL. For private sheets, share the sheet as "Anyone with the link - Viewer" or use a service account.
 
-    if idx and vals:
-        agg_map = {v: agg for v in vals}
-        try:
-            pt = pd.pivot_table(
-                df_filtered,
-                index=idx,
-                columns=cols if cols else None,
-                values=vals,
-                aggfunc=agg
-            )
-            # Flatten multiindex columns for display
-            if isinstance(pt.columns, pd.MultiIndex):
-                pt.columns = [" | ".join([str(x) for x in col]).strip() for col in pt.columns.values]
-            st.dataframe(pt.reset_index(), use_container_width=True)
-        except Exception as e:
-            st.error(f"Pivot failed: {e}")
-    else:
-        st.info("Pick at least Index and Values to create a pivot.")
+        **Column Flexibility**: The app auto-detects common columns (Age, Weight, Gender, Rescue Location, Birth Certificate, Aadhar, Medical Check-Up, Parents Verified, DNA, School, Class, Monthly Attendance). It cleans age/weight, converts YES/NO to boolean, and builds metrics.
 
-# -----------------------------
-# Time Series (if any date cols)
-# -----------------------------
-if date_cols:
-    st.header("⏱ Time Series Overview")
-    ts_date_col = st.selectbox("Choose date/time column", options=date_cols)
-    group_by_col = st.selectbox("Optional: group by", options=["(none)"] + df.columns.tolist(), index=0)
-    y_choice = st.selectbox("Y metric", options=["Row Count"] + num_cols, index=0)
+        **Customize**: Edit `SHEET_ID`, `GID`, or switch to the `sheet` param in `CSV_URL`. You can also rename columns—normalization turns them into lowercase_with_underscores.
 
-    tsdf = df_filtered.copy()
-    tsdf["_date"] = pd.to_datetime(tsdf[ts_date_col], errors="coerce").dt.date
-    base = tsdf.dropna(subset=["_date"]).groupby("_date")
+        **Export**: Use the Download button in the Records tab to export the filtered view.
 
-    if y_choice == "Row Count":
-        if group_by_col == "(none)":
-            series = base.size().reset_index(name="Count")
-            fig = px.line(series, x="_date", y="Count")
-        else:
-            series = tsdf.dropna(subset=[group_by_col]).groupby(["_date", group_by_col]).size().reset_index(name="Count")
-            fig = px.line(series, x="_date", y="Count", color=group_by_col)
-    else:
-        # numeric aggregation
-        if group_by_col == "(none)":
-            series = tsdf.groupby("_date")[y_choice].mean(numeric_only=True).reset_index(name=f"{y_choice} (mean)")
-            fig = px.line(series, x="_date", y=f"{y_choice} (mean)")
-        else:
-            series = tsdf.dropna(subset=[group_by_col]).groupby(["_date", group_by_col])[y_choice].mean(numeric_only=True).reset_index(name=f"{y_choice} (mean)")
-            fig = px.line(series, x="_date", y=f"{y_choice} (mean)", color=group_by_col)
+        **Next Ideas**:
+        - Add write-back to Google Sheets using `gspread` (needs credentials).
+        - Add per-child timeline & notes.
+        - Add geovisualization of rescue locations.
+        - Add cohort tracking for school attendance trend.
+        """
+    )
 
-    st.plotly_chart(fig, use_container_width=True)
-
-# -----------------------------
-# Footnote
-# -----------------------------
-st.caption("Built with ❤ in Streamlit. Works with any shareable Google Sheet link.")
+st.caption("Built with ❤️ in Streamlit. ")
