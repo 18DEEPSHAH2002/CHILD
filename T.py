@@ -1,378 +1,413 @@
-# app.py
-# Streamlit dashboard to analyze "Child Rescue Details" from a Google Sheet
+"""
+Rescued Children – Streamlit Dashboard (app.py)
+================================================
+How to run:
+  1) pip install streamlit pandas numpy plotly python-dateutil
+  2) streamlit run app.py
 
+Set your Google Sheet below (must be shared as "Anyone with the link can view").
+You can also use the file uploader in the sidebar to load a local CSV/Excel.
+"""
 
-import os
-
-# 🔧 Fix for inotify instance limit reached
-# Disables Streamlit's file watcher (hot reload)
-os.environ["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"
-
-import re
 import io
-import math
-import time
-import pandas as pd
+from datetime import datetime, date
+from typing import Optional, Tuple
+
 import numpy as np
-import streamlit as st
+import pandas as pd
 import plotly.express as px
+import streamlit as st
 
-# ----------------------
+# -------------------------
 # CONFIG
-# ----------------------
-SHEET_ID = "13svivZvyrpXZPhApZLcyr4kafCvMcFgC1jIT7Xu64L8"  # provided by user
-GID = "0"  # main tab gid
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
-
+# -------------------------
 st.set_page_config(
-    page_title="Child Rescue Analytics",
-    page_icon="👧🏽",
+    page_title="Rescued Children – Dashboard",
+    page_icon="🧒",
     layout="wide",
 )
 
-# ----------------------
-# THEME (light, clean)
-# ----------------------
-CUSTOM_CSS = """
-<style>
-:root { --radius: 16px; }
-.block-container { padding-top: 1rem; padding-bottom: 3rem; }
-div[data-testid="stMetric"] > div { border-radius: var(--radius); }
-.stDataFrame, .stTable { border-radius: var(--radius); overflow: hidden; }
-.badge { background:#eef2ff; border:1px solid #c7d2fe; padding:4px 10px; border-radius:999px; font-size:12px; }
-.section-title { font-size:1.25rem; font-weight:700; margin: 8px 0 4px 0; }
-.subtle { color:#475569; }
-.kpi-card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:var(--radius); padding:14px; }
-.warn { background:#fff7ed; border:1px solid #fdba74; }
-.ok { background:#ecfeff; border:1px solid #67e8f9; }
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+# 👉 EDIT THESE
+SHEET_ID = "13svivZvyrpXZPhApZLcyr4kafCvMcFgC1jIT7Xu64L8"  # Your Google Sheet ID
+GID = 0  # Tab GID (use the number after gid=... in the URL)
 
-# ----------------------
-# HELPERS
-# ----------------------
+# Basic styles (subtle, readable)
+st.markdown(
+    """
+    <style>
+      .metric {border: 1px solid #e5e7eb; padding: 12px; border-radius: 16px; background: #f8fafc;}
+      .metric h3 {margin: 0 0 4px 0; font-size: 0.9rem; color: #334155;}
+      .metric p {margin: 0; font-size: 1.4rem; font-weight: 700; color: #0f172a;}
+      .small {color:#475569; font-size: 0.85rem}
+      .stDataFrame {border-radius: 12px; overflow: hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [
-        re.sub(r"[^a-z0-9_]+", "_", c.strip().lower().replace(" ", "_")).strip("_")
-        for c in df.columns
-    ]
+# -------------------------
+# DATA LOADING
+# -------------------------
+@st.cache_data(show_spinner=True)
+def load_from_gsheet(sheet_id: str, gid: int = 0) -> pd.DataFrame:
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}"
+    df = pd.read_csv(url)
     return df
 
-AGE_COL_CANDIDATES = ["age", "child_age"]
-WEIGHT_COL_CANDIDATES = ["weight", "wt", "weight_kg"]
-GENDER_COL_CANDIDATES = ["gender", "sex"]
-LOCATION_COL_CANDIDATES = ["rescue_location", "location", "city", "district"]
-SCHOOL_COL_CANDIDATES = ["school_enrollment_specify_the_school_name", "school", "school_name", "enrolled_school"]
-CLASS_COL_CANDIDATES = ["class", "grade", "standard"]
-ATTENDANCE_COL_CANDIDATES = ["monthly_attendance", "attendance", "avg_attendance"]
-BIRTH_CERT_COLS = ["birth_certificate", "birth_cert", "birth_cert_status"]
-AADHAR_COLS = ["aadhar", "aadhaar", "aadhar_status"]
-MEDICAL_COLS = ["medical_check_up", "medical", "medical_status"]
-PARENTS_VERIFIED_COLS = ["parents_verified", "guardians_verified", "verification_status"]
-DNA_COLS = ["dna", "dna_status"]
+@st.cache_data(show_spinner=True)
+def load_file(uploaded) -> pd.DataFrame:
+    if uploaded.name.lower().endswith((".xls", ".xlsx")):
+        return pd.read_excel(uploaded)
+    elif uploaded.name.lower().endswith(".csv"):
+        return pd.read_csv(uploaded)
+    else:
+        # Try csv fallback
+        return pd.read_csv(uploaded)
 
+# -------------------------
+# HELPERS
+# -------------------------
 
-def choose_col(df: pd.DataFrame, candidates) -> str | None:
-    for c in candidates:
-        if c in df.columns:
-            return c
+def coalesce_cols(df: pd.DataFrame, options: list[str]) -> Optional[str]:
+    """Return first existing column from options (case-insensitive match)."""
+    lower_map = {c.lower(): c for c in df.columns}
+    for opt in options:
+        if opt.lower() in lower_map:
+            return lower_map[opt.lower()]
     return None
 
 
-def to_bool_series(s: pd.Series) -> pd.Series:
-    if s is None:
-        return None
-    def _coerce(v):
-        if pd.isna(v):
-            return np.nan
-        x = str(v).strip().lower()
-        if x in {"yes", "y", "true", "1", "done", "completed"}:
-            return True
-        if x in {"no", "n", "false", "0", "pending", "incomplete"}:
-            return False
-        return np.nan
-    return s.map(_coerce)
+def parse_dates_safe(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
 
 
-def parse_age(val):
-    if pd.isna(val):
-        return np.nan
-    s = str(val).strip().lower()
-    m = re.match(r"^(\d+(?:\.\d+)?)[\s\-to]+(\d+(?:\.\d+)?)", s)
-    if m:
-        a = float(m.group(1))
-        b = float(m.group(2))
-        return round((a + b) / 2.0, 2)
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if m:
-        return float(m.group(1))
-    return np.nan
+def make_clickable_link(url: str) -> str:
+    if not isinstance(url, str) or not url.strip():
+        return ""
+    u = url.strip()
+    # If the cell contains a bare URL without scheme, attempt to add https://
+    if not u.lower().startswith(("http://", "https://")):
+        u = "https://" + u
+    name = u.split("/")[-1] or "file"
+    return f'<a href="{u}" target="_blank">📎 {name}</a>'
 
 
-def parse_weight(val):
-    if pd.isna(val):
-        return np.nan
-    s = str(val).lower()
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if m:
-        return float(m.group(1))
-    return np.nan
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_data(csv_url: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_url)
-    df = normalize_columns(df)
-
-    age_col = choose_col(df, AGE_COL_CANDIDATES)
-    weight_col = choose_col(df, WEIGHT_COL_CANDIDATES)
-    gender_col = choose_col(df, GENDER_COL_CANDIDATES)
-
-    if age_col:
-        df[age_col + "_num"] = df[age_col].apply(parse_age)
-    if weight_col:
-        df[weight_col + "_kg"] = df[weight_col].apply(parse_weight)
-    if gender_col:
-        df[gender_col] = df[gender_col].astype(str).str.strip().str.title()
-
-    for candidates in [BIRTH_CERT_COLS, AADHAR_COLS, MEDICAL_COLS, PARENTS_VERIFIED_COLS, DNA_COLS]:
-        col = choose_col(df, candidates)
-        if col:
-            df[col + "_bool"] = to_bool_series(df[col])
-
-    att_col = choose_col(df, ATTENDANCE_COL_CANDIDATES)
-    if att_col and att_col in df.columns:
-        def _att(v):
-            if pd.isna(v):
-                return np.nan
-            s = str(v)
-            m = re.search(r"(\d+(?:\.\d+)?)", s)
-            return float(m.group(1))
-        df[att_col + "_pct"] = df[att_col].apply(_att)
-
-    return df
-
-
-def kpi_card(label: str, value, help_text: str | None = None):
-    with st.container(border=True):
-        st.metric(label, value)
-        if help_text:
-            st.caption(help_text)
-
-
-# ----------------------
-# SIDEBAR
-# ----------------------
-st.sidebar.title("⚙️ Settings")
-st.sidebar.write("Data Source")
-st.sidebar.code(CSV_URL, language="text")
-
-if st.sidebar.button("🔄 Refresh data"):
-    load_data.clear()
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Filters")
-
-with st.spinner("Loading data…"):
+def age_binner(age_val) -> str:
     try:
-        df = load_data(CSV_URL)
-        load_error = None
-    except Exception as e:
-        df = pd.DataFrame()
-        load_error = str(e)
-
-if load_error:
-    st.error("Failed to load data from Google Sheets.\n\n" + load_error)
-    st.stop()
-
-age_col = choose_col(df, AGE_COL_CANDIDATES)
-weight_col = choose_col(df, WEIGHT_COL_CANDIDATES)
-gender_col = choose_col(df, GENDER_COL_CANDIDATES)
-loc_col = choose_col(df, LOCATION_COL_CANDIDATES)
-school_col = choose_col(df, SCHOOL_COL_CANDIDATES)
-class_col = choose_col(df, CLASS_COL_CANDIDATES)
-att_col = choose_col(df, ATTENDANCE_COL_CANDIDATES)
-
-if gender_col and gender_col in df.columns:
-    genders = ["All"] + sorted([g for g in df[gender_col].dropna().unique().tolist() if g])
-    sel_gender = st.sidebar.selectbox("Gender", options=genders, index=0)
-else:
-    sel_gender = "All"
-
-if age_col and age_col + "_num" in df.columns:
-    min_age = float(np.nanmin(df[age_col + "_num"])) if not df.empty else 0.0
-    max_age = float(np.nanmax(df[age_col + "_num"])) if not df.empty else 20.0
-    age_range = st.sidebar.slider("Age range", min_value=0.0, max_value=max(1.0, round(max_age + 0.5, 1)), value=(0.0, max(1.0, max_age)), step=0.5)
-else:
-    age_range = (0.0, 100.0)
-
-if loc_col and loc_col in df.columns:
-    locations = ["All"] + sorted([l for l in df[loc_col].dropna().astype(str).unique().tolist() if l])
-    sel_loc = st.sidebar.selectbox("Rescue location", options=locations, index=0)
-else:
-    sel_loc = "All"
-
-birth_col = choose_col(df, BIRTH_CERT_COLS)
-aadhar_col = choose_col(df, AADHAR_COLS)
-medical_col = choose_col(df, MEDICAL_COLS)
-parents_col = choose_col(df, PARENTS_VERIFIED_COLS)
-dna_col = choose_col(df, DNA_COLS)
-
-req_docs = []
-if birth_col: req_docs.append((birth_col + "_bool", "Missing Birth Certificate"))
-if aadhar_col: req_docs.append((aadhar_col + "_bool", "Missing Aadhar"))
-if medical_col: req_docs.append((medical_col + "_bool", "Medical Pending"))
-if parents_col: req_docs.append((parents_col + "_bool", "Parents Not Verified"))
-if dna_col: req_docs.append((dna_col + "_bool", "DNA Pending"))
-
-with_docs_filter = st.sidebar.toggle("Show only children with pending actions", value=False)
-
-filtered = df.copy()
-if gender_col and sel_gender != "All":
-    filtered = filtered[filtered[gender_col] == sel_gender]
-if age_col and age_col + "_num" in filtered.columns:
-    filtered = filtered[filtered[age_col + "_num"].between(age_range[0], age_range[1])]
-if loc_col and sel_loc != "All":
-    filtered = filtered[filtered[loc_col] == sel_loc]
-if with_docs_filter and req_docs:
-    mask = np.zeros(len(filtered), dtype=bool)
-    for colname, _ in req_docs:
-        if colname in filtered.columns:
-            mask |= (~filtered[colname].fillna(False))
-    filtered = filtered[mask]
-
-# ----------------------
-# HEADER
-# ----------------------
-st.title("👧🏽 Child Rescue Analytics")
-st.caption("Interactive dashboard generated from your Google Sheet. Use the sidebar to filter and the tabs below to explore.")
-
-# ----------------------
-# KPI ROW
-# ----------------------
-col1, col2, col3, col4, col5 = st.columns(5)
-
-total_children = len(filtered)
-with col1:
-    kpi_card("Total children (filtered)", f"{total_children}")
-
-if gender_col and gender_col in filtered.columns:
-    male_ct = int((filtered[gender_col] == "Male").sum())
-    female_ct = int((filtered[gender_col] == "Female").sum())
-    other_ct = int(total_children - male_ct - female_ct)
-    with col2:
-        kpi_card("Gender split (M/F/Other)", f"{male_ct}/{female_ct}/{other_ct}")
-else:
-    with col2:
-        kpi_card("Gender split", "—")
-
-if age_col and age_col + "_num" in filtered.columns:
-    avg_age = round(float(np.nanmean(filtered[age_col + "_num"])) , 2) if total_children else np.nan
-    with col3:
-        kpi_card("Avg. age", f"{avg_age if not math.isnan(avg_age) else '—'} yrs")
-else:
-    with col3:
-        kpi_card("Avg. age", "—")
-
-if weight_col and weight_col + "_kg" in filtered.columns:
-    avg_wt = round(float(np.nanmean(filtered[weight_col + "_kg"])) , 2) if total_children else np.nan
-    with col4:
-        kpi_card("Avg. weight", f"{avg_wt if not math.isnan(avg_wt) else '—'} kg")
-else:
-    with col4:
-        kpi_card("Avg. weight", "—")
-
-completed_parts = []
-possible_parts = 0
-for (colname, label) in req_docs:
-    if colname in filtered.columns:
-        possible_parts += len(filtered)
-        completed_parts.append(filtered[colname].fillna(False).sum())
-if possible_parts > 0:
-    docs_completion = int(round(100 * sum(completed_parts) / possible_parts))
-else:
-    docs_completion = None
-with col5:
-    kpi_card("Documentation complete", f"{docs_completion}%" if docs_completion is not None else "—", "Share of YES across doc/medical checks")
-
-# ----------------------
-# TABS
-# ----------------------
-
-overview_tab, records_tab, gaps_tab = st.tabs([
-    "📊 Overview", "📋 Records", "⚠️ Gaps & Actions"
-])
-
-with overview_tab:
-    st.subheader("Snapshot")
-    left, right = st.columns([1,1])
-
-    if gender_col and gender_col in filtered.columns and not filtered.empty:
-        gender_counts = (
-            filtered.groupby(gender_col).size().reset_index(name="count")
-        )
-        fig = px.pie(gender_counts, names=gender_col, values="count", title="Gender Distribution")
-        left.plotly_chart(fig, use_container_width=True)
+        a = float(age_val)
+    except Exception:
+        return "Unknown"
+    if a < 7:
+        return "0–6"
+    elif a < 13:
+        return "7–12"
+    elif a <= 18:
+        return "13–18"
     else:
-        left.info("Gender column not found.")
+        return ">18"
 
-    if age_col and age_col + "_num" in filtered.columns and not filtered.empty:
-        ages = filtered[age_col + "_num"].dropna()
-        if not ages.empty:
-            bins = [0,2,5,10,15,20]
-            labels = ["0-2","2-5","5-10","10-15","15-20"]
-            bands = pd.cut(ages, bins=bins, labels=labels, include_lowest=True)
-            age_df = pd.DataFrame({"Age Band": bands}).value_counts().reset_index(name="count")
-            age_df = age_df.rename(columns={0:"count"}) if 0 in age_df.columns else age_df
-            fig2 = px.bar(age_df, x="Age Band", y="count", title="Age Bands")
-            right.plotly_chart(fig2, use_container_width=True)
+
+# -------------------------
+# LOAD DATA (GSHEET or UPLOAD)
+# -------------------------
+with st.sidebar:
+    st.header("🔌 Data Source")
+    use_gsheet = st.toggle("Use Google Sheet", value=True)
+    sheet_id_input = st.text_input("Google Sheet ID", value=SHEET_ID)
+    gid_input = st.number_input("GID (tab id)", value=GID, step=1)
+    uploaded = st.file_uploader("…or upload CSV/Excel", type=["csv", "xls", "xlsx"])
+
+if uploaded is not None:
+    df_raw = load_file(uploaded)
+else:
+    if use_gsheet and sheet_id_input:
+        try:
+            df_raw = load_from_gsheet(sheet_id_input, int(gid_input))
+        except Exception as e:
+            st.error(f"Could not load Google Sheet: {e}")
+            st.stop()
+    else:
+        st.warning("Provide a Google Sheet ID or upload a file.")
+        st.stop()
+
+# Clean columns: strip, unify spaces
+df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+# Detect commonly used columns
+COL_OFFICER = coalesce_cols(df_raw, ["Marked to Officer", "Officer", "Nodal Officer", "Assigned Officer"]) or None
+COL_PRIORITY = coalesce_cols(df_raw, ["Priority"]) or None
+COL_BRANCH = coalesce_cols(df_raw, ["Dealing Branch", "Branch"]) or None
+COL_SUBJECT = coalesce_cols(df_raw, ["Subject"]) or None
+COL_RECEIVED_FROM = coalesce_cols(df_raw, ["Received From", "Source", "Source of Rescue"]) or None
+COL_FILE = coalesce_cols(df_raw, ["File", "Document", "Attachment", "Link"]) or None
+COL_ENTRY_DATE = coalesce_cols(df_raw, ["Entry Date", "Date", "Created On"]) or None
+COL_STATUS = coalesce_cols(df_raw, ["Status"]) or None
+COL_RESPONSE = coalesce_cols(df_raw, ["Response Recieved", "Response Received", "Response", "Reply"]) or None
+COL_STATE = coalesce_cols(df_raw, ["State"]) or None
+COL_DISTRICT = coalesce_cols(df_raw, ["District"]) or None
+COL_GENDER = coalesce_cols(df_raw, ["Gender", "Sex"]) or None
+COL_AGE = coalesce_cols(df_raw, ["Age"]) or None
+
+# Parse dates
+if COL_ENTRY_DATE:
+    df_raw[COL_ENTRY_DATE] = parse_dates_safe(df_raw[COL_ENTRY_DATE])
+
+# Derived columns
+if COL_AGE:
+    df_raw["Age Band"] = df_raw[COL_AGE].apply(age_binner)
+
+if COL_FILE:
+    df_raw["File Link"] = df_raw[COL_FILE].apply(make_clickable_link)
+
+# -------------------------
+# SIDEBAR FILTERS
+# -------------------------
+with st.sidebar:
+    st.header("🔎 Filters")
+    # Date range
+    if COL_ENTRY_DATE:
+        min_d = pd.to_datetime(df_raw[COL_ENTRY_DATE]).min()
+        max_d = pd.to_datetime(df_raw[COL_ENTRY_DATE]).max()
+        if pd.isna(min_d) or pd.isna(max_d):
+            date_range = None
         else:
-            right.info("No numeric age data.")
+            start, end = st.date_input(
+                "Entry Date Range",
+                value=(min_d.date(), max_d.date()),
+                min_value=min_d.date(),
+                max_value=max_d.date(),
+            )
+            date_range = (pd.Timestamp(start), pd.Timestamp(end) + pd.Timedelta(days=1))
     else:
-        right.info("Age column not found.")
+        date_range = None
 
-with records_tab:
-    st.subheader("Filtered Records")
-    st.caption("Tip: Use the column header menu to search & sort. Download below.")
-    st.dataframe(filtered, use_container_width=True, hide_index=True)
+    def multiselect_if(col_name: Optional[str], label: str):
+        if not col_name:
+            return None
+        opts = sorted([x for x in df_raw[col_name].dropna().astype(str).unique() if x != ""])
+        return st.multiselect(label, options=opts, default=[])
 
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download filtered CSV",
-        data=csv_bytes,
-        file_name="child_rescue_filtered.csv",
-        mime="text/csv",
+    f_officer = multiselect_if(COL_OFFICER, "Officer")
+    f_branch = multiselect_if(COL_BRANCH, "Branch")
+    f_priority = multiselect_if(COL_PRIORITY, "Priority")
+    f_state = multiselect_if(COL_STATE, "State")
+    f_district = multiselect_if(COL_DISTRICT, "District")
+    f_status = multiselect_if(COL_STATUS, "Status")
+
+# Apply filters
+fdf = df_raw.copy()
+
+if date_range and COL_ENTRY_DATE:
+    s, e = date_range
+    fdf = fdf[(fdf[COL_ENTRY_DATE] >= s) & (fdf[COL_ENTRY_DATE] < e)]
+
+if COL_OFFICER and f_officer:
+    fdf = fdf[fdf[COL_OFFICER].astype(str).isin(f_officer)]
+if COL_BRANCH and f_branch:
+    fdf = fdf[fdf[COL_BRANCH].astype(str).isin(f_branch)]
+if COL_PRIORITY and f_priority:
+    fdf = fdf[fdf[COL_PRIORITY].astype(str).isin(f_priority)]
+if COL_STATE and f_state:
+    fdf = fdf[fdf[COL_STATE].astype(str).isin(f_state)]
+if COL_DISTRICT and f_district:
+    fdf = fdf[fdf[COL_DISTRICT].astype(str).isin(f_district)]
+if COL_STATUS and f_status:
+    fdf = fdf[fdf[COL_STATUS].astype(str).isin(f_status)]
+
+# -------------------------
+# HEADER
+# -------------------------
+st.title("🧒 Rescued Children – Monitoring Dashboard")
+st.caption("Analyze, filter, and monitor case progress with clean visuals and KPIs.")
+
+# -------------------------
+# KPIs
+# -------------------------
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    total_cases = len(fdf)
+    st.markdown("<div class='metric'><h3>Total Cases</h3><p>{}</p></div>".format(total_cases), unsafe_allow_html=True)
+
+with col2:
+    pending = None
+    if COL_STATUS:
+        pending = (fdf[COL_STATUS].astype(str).str.lower().isin(["pending", "open", "in progress"]).sum())
+        st.markdown("<div class='metric'><h3>Pending</h3><p>{}</p></div>".format(int(pending)), unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='metric'><h3>Pending</h3><p>—</p></div>", unsafe_allow_html=True)
+
+with col3:
+    responded_pct = "—"
+    if COL_RESPONSE:
+        # Treat truthy strings like Yes/Received as responded
+        responded = fdf[COL_RESPONSE].astype(str).str.lower().isin(["yes", "received", "true", "y"]).sum()
+        responded_pct = f"{(responded / total_cases * 100):.1f}%" if total_cases else "0%"
+    st.markdown("<div class='metric'><h3>Response Rate</h3><p>{}</p></div>".format(responded_pct), unsafe_allow_html=True)
+
+with col4:
+    missing_files = "—"
+    if COL_FILE:
+        missing_files = fdf[COL_FILE].isna().sum() + (fdf[COL_FILE].astype(str).str.strip() == "").sum()
+    st.markdown("<div class='metric'><h3>Missing Files</h3><p>{}</p></div>".format(missing_files), unsafe_allow_html=True)
+
+# -------------------------
+# CHARTS
+# -------------------------
+
+def safe_bar(df: pd.DataFrame, x: str, y: str, title: str):
+    if df.empty:
+        st.info("No data for this chart.")
+        return
+    fig = px.bar(df, x=x, y=y, title=title)
+    st.plotly_chart(fig, use_container_width=True)
+
+# 1) Trend: Cases by month
+if COL_ENTRY_DATE and not fdf.empty:
+    temp = fdf.copy()
+    temp["Month"] = temp[COL_ENTRY_DATE].dt.to_period("M").dt.to_timestamp()
+    by_month = temp.groupby("Month").size().reset_index(name="Count")
+    fig = px.line(by_month, x="Month", y="Count", markers=True, title="Cases Over Time (by Month)")
+    st.plotly_chart(fig, use_container_width=True)
+
+# Two-column charts block
+c1, c2 = st.columns(2)
+
+with c1:
+    # Cases by Officer
+    if COL_OFFICER:
+        by_officer = fdf.groupby(COL_OFFICER).size().reset_index(name="Count").sort_values("Count", ascending=False)
+        safe_bar(by_officer, x=COL_OFFICER, y="Count", title="Cases by Officer")
+    else:
+        st.info("Officer column not found.")
+
+with c2:
+    # Cases by Branch
+    if COL_BRANCH:
+        by_branch = fdf.groupby(COL_BRANCH).size().reset_index(name="Count").sort_values("Count", ascending=False)
+        safe_bar(by_branch, x=COL_BRANCH, y="Count", title="Cases by Branch")
+    else:
+        st.info("Branch column not found.")
+
+c3, c4 = st.columns(2)
+
+with c3:
+    # Priority Pie
+    if COL_PRIORITY:
+        pri = fdf[COL_PRIORITY].astype(str).replace({"": np.nan}).dropna()
+        pri_df = pri.value_counts().reset_index()
+        pri_df.columns = ["Priority", "Count"]
+        if not pri_df.empty:
+            fig = px.pie(pri_df, names="Priority", values="Count", title="Priority Distribution")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No priority data.")
+    else:
+        st.info("Priority column not found.")
+
+with c4:
+    # Status Pie
+    if COL_STATUS:
+        stat = fdf[COL_STATUS].astype(str).replace({"": np.nan}).dropna()
+        stat_df = stat.value_counts().reset_index()
+        stat_df.columns = ["Status", "Count"]
+        if not stat_df.empty:
+            fig = px.pie(stat_df, names="Status", values="Count", title="Case Status")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No status data.")
+    else:
+        st.info("Status column not found.")
+
+c5, c6 = st.columns(2)
+
+with c5:
+    # Gender Pie
+    if COL_GENDER:
+        g = fdf[COL_GENDER].astype(str).replace({"": np.nan}).dropna()
+        g_df = g.value_counts().reset_index()
+        g_df.columns = ["Gender", "Count"]
+        if not g_df.empty:
+            fig = px.pie(g_df, names="Gender", values="Count", title="Gender Ratio")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No gender data.")
+    else:
+        st.info("Gender column not found.")
+
+with c6:
+    # Age Bands
+    if COL_AGE or "Age Band" in fdf.columns:
+        if "Age Band" not in fdf.columns:
+            fdf["Age Band"] = fdf[COL_AGE].apply(age_binner)
+        ab = (
+            fdf["Age Band"].astype(str).replace({"": np.nan}).dropna().value_counts().reindex(["0–6", "7–12", "13–18", ">18", "Unknown"], fill_value=0).reset_index()
+        )
+        ab.columns = ["Age Band", "Count"]
+        safe_bar(ab, x="Age Band", y="Count", title="Age Distribution")
+    else:
+        st.info("Age column not found.")
+
+# -------------------------
+# TABLE (with clickable file links if present)
+# -------------------------
+st.subheader("📋 Records")
+show_cols = list(df_raw.columns)
+if "File Link" in fdf.columns:
+    # Insert the clickable column next to the original file column for visibility
+    if COL_FILE and COL_FILE in show_cols:
+        insert_at = show_cols.index(COL_FILE) + 1
+    else:
+        insert_at = len(show_cols)
+    if "File Link" not in show_cols:
+        show_cols.insert(insert_at, "File Link")
+
+# Allow download of filtered data
+csv_data = fdf.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Download filtered CSV", data=csv_data, file_name="rescued_children_filtered.csv", mime="text/csv")
+
+# Render table
+if "File Link" in fdf.columns:
+    df_display = fdf.copy()
+    # Use HTML for the clickable link
+    st.write(
+        df_display[show_cols]
+        .to_html(escape=False, index=False)
+        .replace("<table", "<div class='small'>Scroll horizontally for more →</div><table"),
+        unsafe_allow_html=True,
     )
+else:
+    st.dataframe(fdf[show_cols], use_container_width=True)
 
-with gaps_tab:
-    st.subheader("Pending Actions")
-    if not req_docs:
-        st.info("No documentation/medical columns found.")
-    else:
-        cols = st.columns(2)
-        todo_frames = []
-        for (colname, label) in req_docs:
-            if colname in filtered.columns:
-                pending_df = filtered[~filtered[colname].fillna(False)]
-                count = len(pending_df)
-                with cols[0] if len(todo_frames)%2==0 else cols[1]:
-                    with st.container(border=True, key=label):
-                        st.markdown(f"**{label}**")
-                        st.write(f"{count} child(ren) pending")
-                        if count:
-                            st.dataframe(pending_df, use_container_width=True, hide_index=True)
-                            todo_frames.append(pending_df)
-        if not todo_frames:
-            st.success("Great! No pending items found for the current filters.")
+# -------------------------
+# INSIGHTS
+# -------------------------
+st.subheader("🔍 Quick Insights")
+ins = []
+if COL_OFFICER and not fdf.empty:
+    top_officer = fdf[COL_OFFICER].value_counts().idxmax()
+    top_officer_cnt = fdf[COL_OFFICER].value_counts().max()
+    ins.append(f"Most assigned officer: **{top_officer}** ({top_officer_cnt} cases)")
+if COL_BRANCH and not fdf.empty:
+    top_branch = fdf[COL_BRANCH].value_counts().idxmax()
+    ins.append(f"Heaviest branch: **{top_branch}**")
+if COL_PRIORITY and not fdf.empty:
+    high_cnt = (fdf[COL_PRIORITY].astype(str).str.lower() == "high").sum()
+    if high_cnt:
+        ins.append(f"High-priority cases: **{high_cnt}**")
+if COL_STATUS and not fdf.empty:
+    pending_cnt = (fdf[COL_STATUS].astype(str).str.lower().isin(["pending", "open", "in progress"]).sum())
+    if pending_cnt:
+        ins.append(f"Pending/open cases: **{int(pending_cnt)}**")
+if COL_FILE and not fdf.empty:
+    missing_files_cnt = fdf[COL_FILE].isna().sum() + (fdf[COL_FILE].astype(str).str.strip() == "").sum()
+    if missing_files_cnt:
+        ins.append(f"Records missing file links: **{int(missing_files_cnt)}**")
 
-# ----------------------
-# FOOTER / HELP
-# ----------------------
-with st.expander("ℹ️ How this works / Setup"):
-    st.markdown(
-        """
-        **Data Source**: This app reads your Google Sheet via the CSV export URL. For private sheets, share the sheet as "Anyone with the link - Viewer" or use a service
-""")
+if ins:
+    for i in ins:
+        st.markdown(f"- {i}")
+else:
+    st.write("No notable insights based on current filters.")
+
+st.caption("Built with ❤️ in Streamlit. Use the sidebar to filter and explore. ")
