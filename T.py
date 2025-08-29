@@ -1,6 +1,6 @@
 # app.py
 # Streamlit dashboard to analyze "Child Rescue Details" from a Google Sheet
-# Author: ChatGPT (GPT-5 Thinking)
+
 
 import os
 
