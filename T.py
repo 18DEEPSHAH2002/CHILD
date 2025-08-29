@@ -1,123 +1,28 @@
-import streamlit as st
+# app.py
+# Streamlit dashboard to analyze "Child Rescue Details" from a Google Sheet
+# Author: ChatGPT (GPT-5 Thinking)
+
+import re
+import io
+import math
+import time
 import pandas as pd
+import numpy as np
+import streamlit as st
 import plotly.express as px
 
-# --- Page Configuration ---
-st.set_page_config(
-    page_title="Task Management Dashboard",
-    page_icon="✅",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# --- Google Sheet Details ---
-SHEET_ID = "13svivZvyrpXZPhApZLcyr4kafCvMcFgC1jIT7Xu64L8"
-GID = "0"
+# ----------------------
+# CONFIG
+# ----------------------
+SHEET_ID = "13svivZvyrpXZPhApZLcyr4kafCvMcFgC1jIT7Xu64L8"  # provided by user
+GID = "0"  # main tab gid
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-# --- Data Loader ---
-@st.cache_data
-def load_data():
-    df = pd.read_csv(CSV_URL)
-    # normalize column names
-    df.columns = df.columns.str.strip()
-    return df
-
-df = load_data()
-
-# --- Sidebar Filters ---
-st.sidebar.header("Filters")
-priority_options = df["Priority"].dropna().unique().tolist() if "Priority" in df else []
-status_options = df["Status"].dropna().unique().tolist() if "Status" in df else []
-department_options = df["Department"].dropna().unique().tolist() if "Department" in df else []
-
-priority_filter = st.sidebar.multiselect("Priority", priority_options, default=priority_options)
-status_filter = st.sidebar.multiselect("Status", status_options, default=status_options)
-department_filter = st.sidebar.multiselect("Department", department_options, default=department_options)
-
-# --- Apply Filters ---
-filtered_df = df.copy()
-if "Priority" in df:
-    filtered_df = filtered_df[filtered_df["Priority"].isin(priority_filter)]
-if "Status" in df:
-    filtered_df = filtered_df[filtered_df["Status"].isin(status_filter)]
-if "Department" in df:
-    filtered_df = filtered_df[filtered_df["Department"].isin(department_filter)]
-
-# --- Dashboard Title ---
-st.title("📊 Task Management Dashboard")
-
-# --- KPIs ---
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Total Tasks", len(filtered_df))
-with col2:
-    st.metric("Completed Tasks", len(filtered_df[filtered_df["Status"].str.lower() == "completed"]) if "Status" in filtered_df else 0)
-with col3:
-    st.metric("Pending Tasks", len(filtered_df[filtered_df["Status"].str.lower() == "pending"]) if "Status" in filtered_df else 0)
-with col4:
-    if "Priority" in filtered_df:
-        urgent = len(filtered_df[filtered_df["Priority"].str.lower() == "high"])
-    else:
-        urgent = 0
-    st.metric("High Priority", urgent)
-
-st.markdown("---")
-
-# --- Charts Section ---
-tab1, tab2, tab3 = st.tabs(["📈 Overview", "📋 Task Records", "⚠️ Pending Analysis"])
-
-with tab1:
-    st.subheader("Task Distribution")
-
-    if "Priority" in filtered_df:
-        fig_priority = px.bar(
-            filtered_df["Priority"].value_counts().reset_index(),
-            x="index",
-            y="Priority",
-            title="Tasks by Priority",
-            labels={"index": "Priority", "Priority": "Count"},
-            color="index"
-        )
-        st.plotly_chart(fig_priority, use_container_width=True)
-
-    if "Department" in filtered_df:
-        fig_dept = px.pie(
-            filtered_df,
-            names="Department",
-            title="Tasks by Department"
-        )
-        st.plotly_chart(fig_dept, use_container_width=True)
-
-    if "Status" in filtered_df:
-        fig_status = px.histogram(
-            filtered_df,
-            x="Status",
-            title="Tasks by Status",
-            color="Status"
-        )
-        st.plotly_chart(fig_status, use_container_width=True)
-
-with tab2:
-    st.subheader("All Task Records")
-    st.dataframe(filtered_df, use_container_width=True)
-
-    csv = filtered_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="📥 Download Filtered Data as CSV",
-        data=csv,
-        file_name="task_records.csv",
-        mime="text/csv"
-    )
-
-with tab3:
-    st.subheader("Pending Tasks")
-    if "Status" in filtered_df:
-        pending_tasks = filtered_df[filtered_df["Status"].str.lower() == "pending"]
-        st.dataframe(pending_tasks, use_container_width=True)
-        st.write(f"⚠️ Total Pending: **{len(pending_tasks)}**")
-    else:
-        st.info("No status column found in sheet.")
+st.set_page_config(
+    page_title="Child Rescue Analytics",
+    page_icon="👧🏽",
+    layout="wide",
+)
 
 # ----------------------
 # THEME (light, clean)
