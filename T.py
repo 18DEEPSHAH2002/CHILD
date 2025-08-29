@@ -2,6 +2,12 @@
 # Streamlit dashboard to analyze "Child Rescue Details" from a Google Sheet
 # Author: ChatGPT (GPT-5 Thinking)
 
+import os
+
+# 🔧 Fix for inotify instance limit reached
+# Disables Streamlit's file watcher (hot reload)
+os.environ["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"
+
 import re
 import io
 import math
@@ -370,4 +376,3 @@ with st.expander("ℹ️ How this works / Setup"):
         """
         **Data Source**: This app reads your Google Sheet via the CSV export URL. For private sheets, share the sheet as "Anyone with the link - Viewer" or use a service
 """)
-    
