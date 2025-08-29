@@ -369,5 +369,5 @@ with st.expander("ℹ️ How this works / Setup"):
     st.markdown(
         """
         **Data Source**: This app reads your Google Sheet via the CSV export URL. For private sheets, share the sheet as "Anyone with the link - Viewer" or use a service
-"""
+""")
     
