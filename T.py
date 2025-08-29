@@ -14,12 +14,8 @@ import plotly.express as px
 # ----------------------
 # CONFIG
 # ----------------------
-# 👉 Replace these with your own Sheet settings if needed
 SHEET_ID = "13svivZvyrpXZPhApZLcyr4kafCvMcFgC1jIT7Xu64L8"  # provided by user
-GID = "0"  # main tab gid; change if your data lives in another tab
-
-# You may also hardcode the tab name instead of gid by using the 'sheet' query param
-# e.g. CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Sheet1"
+GID = "0"  # main tab gid
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
 st.set_page_config(
@@ -33,16 +29,11 @@ st.set_page_config(
 # ----------------------
 CUSTOM_CSS = """
 <style>
-/***** Global *****/
 :root { --radius: 16px; }
 .block-container { padding-top: 1rem; padding-bottom: 3rem; }
-/* Cards */
 div[data-testid="stMetric"] > div { border-radius: var(--radius); }
-/* Tables */
 .stDataFrame, .stTable { border-radius: var(--radius); overflow: hidden; }
-/* Pills */
 .badge { background:#eef2ff; border:1px solid #c7d2fe; padding:4px 10px; border-radius:999px; font-size:12px; }
-/* Section headers */
 .section-title { font-size:1.25rem; font-weight:700; margin: 8px 0 4px 0; }
 .subtle { color:#475569; }
 .kpi-card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:var(--radius); padding:14px; }
@@ -57,7 +48,6 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # ----------------------
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Lowercase, strip, replace spaces and special chars with underscores."""
     df = df.copy()
     df.columns = [
         re.sub(r"[^a-z0-9_]+", "_", c.strip().lower().replace(" ", "_")).strip("_")
@@ -105,13 +95,11 @@ def parse_age(val):
     if pd.isna(val):
         return np.nan
     s = str(val).strip().lower()
-    # ranges like "3-4" or "3 to 4"
     m = re.match(r"^(\d+(?:\.\d+)?)[\s\-to]+(\d+(?:\.\d+)?)", s)
     if m:
         a = float(m.group(1))
         b = float(m.group(2))
         return round((a + b) / 2.0, 2)
-    # numbers with text like "3 yrs", "4y"
     m = re.search(r"(\d+(?:\.\d+)?)", s)
     if m:
         return float(m.group(1))
@@ -133,7 +121,6 @@ def load_data(csv_url: str) -> pd.DataFrame:
     df = pd.read_csv(csv_url)
     df = normalize_columns(df)
 
-    # Coerce key columns if present
     age_col = choose_col(df, AGE_COL_CANDIDATES)
     weight_col = choose_col(df, WEIGHT_COL_CANDIDATES)
     gender_col = choose_col(df, GENDER_COL_CANDIDATES)
@@ -145,13 +132,11 @@ def load_data(csv_url: str) -> pd.DataFrame:
     if gender_col:
         df[gender_col] = df[gender_col].astype(str).str.strip().str.title()
 
-    # Boolean-ish columns
     for candidates in [BIRTH_CERT_COLS, AADHAR_COLS, MEDICAL_COLS, PARENTS_VERIFIED_COLS, DNA_COLS]:
         col = choose_col(df, candidates)
         if col:
             df[col + "_bool"] = to_bool_series(df[col])
 
-    # attendance to numeric percent if present
     att_col = choose_col(df, ATTENDANCE_COL_CANDIDATES)
     if att_col and att_col in df.columns:
         def _att(v):
@@ -183,11 +168,8 @@ if st.sidebar.button("🔄 Refresh data"):
     load_data.clear()
 
 st.sidebar.markdown("---")
-
-# Filters (dynamic)
 st.sidebar.subheader("Filters")
 
-# Load data
 with st.spinner("Loading data…"):
     try:
         df = load_data(CSV_URL)
@@ -200,7 +182,6 @@ if load_error:
     st.error("Failed to load data from Google Sheets.\n\n" + load_error)
     st.stop()
 
-# figure out common columns
 age_col = choose_col(df, AGE_COL_CANDIDATES)
 weight_col = choose_col(df, WEIGHT_COL_CANDIDATES)
 gender_col = choose_col(df, GENDER_COL_CANDIDATES)
@@ -209,7 +190,6 @@ school_col = choose_col(df, SCHOOL_COL_CANDIDATES)
 class_col = choose_col(df, CLASS_COL_CANDIDATES)
 att_col = choose_col(df, ATTENDANCE_COL_CANDIDATES)
 
-# Optional filters
 if gender_col and gender_col in df.columns:
     genders = ["All"] + sorted([g for g in df[gender_col].dropna().unique().tolist() if g])
     sel_gender = st.sidebar.selectbox("Gender", options=genders, index=0)
@@ -229,7 +209,6 @@ if loc_col and loc_col in df.columns:
 else:
     sel_loc = "All"
 
-# documentation filters
 birth_col = choose_col(df, BIRTH_CERT_COLS)
 aadhar_col = choose_col(df, AADHAR_COLS)
 medical_col = choose_col(df, MEDICAL_COLS)
@@ -245,7 +224,6 @@ if dna_col: req_docs.append((dna_col + "_bool", "DNA Pending"))
 
 with_docs_filter = st.sidebar.toggle("Show only children with pending actions", value=False)
 
-# Apply filters
 filtered = df.copy()
 if gender_col and sel_gender != "All":
     filtered = filtered[filtered[gender_col] == sel_gender]
@@ -257,7 +235,6 @@ if with_docs_filter and req_docs:
     mask = np.zeros(len(filtered), dtype=bool)
     for colname, _ in req_docs:
         if colname in filtered.columns:
-            # pending = False or NaN
             mask |= (~filtered[colname].fillna(False))
     filtered = filtered[mask]
 
@@ -302,7 +279,6 @@ else:
     with col4:
         kpi_card("Avg. weight", "—")
 
-# docs completion rate
 completed_parts = []
 possible_parts = 0
 for (colname, label) in req_docs:
@@ -320,7 +296,7 @@ with col5:
 # TABS
 # ----------------------
 
-overview_tab, records_tab, gaps_tab, charts_tab = st.tabs([
+overview_tab, records_tab, gaps_tab = st.tabs([
     "📊 Overview", "📋 Records", "⚠️ Gaps & Actions"
 ])
 
@@ -328,7 +304,6 @@ with overview_tab:
     st.subheader("Snapshot")
     left, right = st.columns([1,1])
 
-    # Gender distribution
     if gender_col and gender_col in filtered.columns and not filtered.empty:
         gender_counts = (
             filtered.groupby(gender_col).size().reset_index(name="count")
@@ -338,9 +313,7 @@ with overview_tab:
     else:
         left.info("Gender column not found.")
 
-    # Age distribution
     if age_col and age_col + "_num" in filtered.columns and not filtered.empty:
-        # create age bands
         ages = filtered[age_col + "_num"].dropna()
         if not ages.empty:
             bins = [0,2,5,10,15,20]
@@ -360,7 +333,6 @@ with records_tab:
     st.caption("Tip: Use the column header menu to search & sort. Download below.")
     st.dataframe(filtered, use_container_width=True, hide_index=True)
 
-    # Download
     csv_bytes = filtered.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇️ Download filtered CSV",
@@ -390,27 +362,10 @@ with gaps_tab:
         if not todo_frames:
             st.success("Great! No pending items found for the current filters.")
 
-
 # ----------------------
 # FOOTER / HELP
 # ----------------------
 with st.expander("ℹ️ How this works / Setup"):
     st.markdown(
         """
-        **Data Source**: This app reads your Google Sheet via the CSV export URL. For private sheets, share the sheet as "Anyone with the link - Viewer" or use a service account.
-
-        **Column Flexibility**: The app auto-detects common columns (Age, Weight, Gender, Rescue Location, Birth Certificate, Aadhar, Medical Check-Up, Parents Verified, DNA, School, Class, Monthly Attendance). It cleans age/weight, converts YES/NO to boolean, and builds metrics.
-
-        **Customize**: Edit `SHEET_ID`, `GID`, or switch to the `sheet` param in `CSV_URL`. You can also rename columns—normalization turns them into lowercase_with_underscores.
-
-        **Export**: Use the Download button in the Records tab to export the filtered view.
-
-        **Next Ideas**:
-        - Add write-back to Google Sheets using `gspread` (needs credentials).
-        - Add per-child timeline & notes.
-        - Add geovisualization of rescue locations.
-        - Add cohort tracking for school attendance trend.
-        """
-    )
-
-st.caption("Built with ❤️ in Streamlit. ")
+        **Data Source**: This app reads your Google Sheet via the CSV export URL. For private sheets, share the sheet as "Anyone with the link - Viewer" or use a service
