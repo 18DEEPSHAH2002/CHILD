@@ -321,7 +321,7 @@ with col5:
 # ----------------------
 
 overview_tab, records_tab, gaps_tab, charts_tab = st.tabs([
-    "📊 Overview", "📋 Records", "⚠️ Gaps & Actions", "📈 Charts"
+    "📊 Overview", "📋 Records", "⚠️ Gaps & Actions"
 ])
 
 with overview_tab:
@@ -390,30 +390,6 @@ with gaps_tab:
         if not todo_frames:
             st.success("Great! No pending items found for the current filters.")
 
-with charts_tab:
-    st.subheader("Custom Charts")
-
-    # Choose x/y quickly from available numeric/categorical columns
-    numeric_cols = [c for c in filtered.columns if pd.api.types.is_numeric_dtype(filtered[c])]
-    cat_cols = [c for c in filtered.columns if filtered[c].dtype == object and filtered[c].nunique() <= 50]
-
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        x_cat = st.selectbox("Category (x)", options=[None] + cat_cols, index=0)
-    with col_b:
-        y_num = st.selectbox("Value (y)", options=[None] + numeric_cols, index=0)
-
-    if x_cat and y_num:
-        aggfunc = st.radio("Aggregate", ["mean", "sum", "count"], horizontal=True)
-        if aggfunc == "count":
-            plot_df = filtered.groupby(x_cat).size().reset_index(name="value")
-        else:
-            plot_df = filtered.groupby(x_cat)[y_num].agg(aggfunc).reset_index(name="value")
-        fig3 = px.bar(plot_df, x=x_cat, y="value", title=f"{aggfunc.title()} of {y_num} by {x_cat}")
-        st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.info("Select a category and a numeric value to build a chart.")
 
 # ----------------------
 # FOOTER / HELP
